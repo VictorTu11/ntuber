@@ -1,14 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { ethers } from 'ethers'; // 引入 ethers.js
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
+import { ethers } from 'ethers'; // 標準 NPM 導入
+import L from 'leaflet';         // 標準 NPM 導入
+import 'leaflet/dist/leaflet.css'; // 直接導入 CSS
 import { 
   MapPin, 
   Navigation, 
   Bike, 
   Star, 
   User, 
-  Clock, // 用於顯示時間
+  Clock, 
   ShieldCheck, 
   Wallet, 
   Menu,
@@ -17,23 +17,21 @@ import {
   List,
   Loader2, 
   XCircle,
-  History // 用於歷史紀錄圖標
+  History
 } from 'lucide-react';
 
 /**
- * NTUber DApp - Web3 Integration (Sepolia)
- * 合約地址: 0xa5a5d38a99dcd0863C62347337Bf90093A54eFeE
- * * 功能更新：
- * 1. 新增「我的行程」列表頁面
- * 2. 支援從列表取消特定訂單
- * 3. 優化 Menu 按鈕導航邏輯
+ * NTUber DApp - Local Development Version (Standard)
+ * * 功能確認：
+ * 1. 司機點擊列表訂單時，地圖會顯示對應的起點/終點大頭釘 (Preview Mode)。
+ * 2. 已修復 BigInt 編譯錯誤 (移除 n 後綴)。
+ * 3. 包含 P2P 訂單簿、歷史紀錄、取消功能、地址自動填入。
  */
 
 // --- 合約設定 ---
 const CONTRACT_ADDRESS = "0xa5a5d38a99dcd0863C62347337Bf90093A54eFeE";
 const SEPOLIA_CHAIN_ID = '0xaa36a7'; 
 
-// 從 ntuber.sol 推導出的 ABI
 const CONTRACT_ABI = [
   "function requestRide(string memory _pickup, string memory _dropoff) public payable",
   "function acceptRide(uint256 _rideId) public",
@@ -56,9 +54,8 @@ const NTUberApp = () => {
   const [role, setRole] = useState('passenger');
   const [walletAddress, setWalletAddress] = useState('');
   const [balance, setBalance] = useState('0.00'); 
-  const [appState, setAppState] = useState('IDLE'); // IDLE, HISTORY, WAITING_DRIVER, DRIVER_EN_ROUTE, IN_TRIP, RATING
+  const [appState, setAppState] = useState('IDLE'); 
   
-  // 智能合約物件
   const [provider, setProvider] = useState(null);
   const [signer, setSigner] = useState(null);
   const [contract, setContract] = useState(null);
@@ -74,11 +71,12 @@ const NTUberApp = () => {
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState(''); 
 
-  // 鏈上數據
   const [allRides, setAllRides] = useState([]); 
   const [myCurrentRide, setMyCurrentRide] = useState(null);
+  // 新增 previewRide 狀態：用於司機在列表中點選某個訂單時，在地圖上預覽該訂單路線
+  const [previewRide, setPreviewRide] = useState(null); 
 
-  // --- 輔助功能：解析 Location JSON ---
+  // --- 輔助功能 ---
   const parseLocation = (locString) => {
     try {
       return JSON.parse(locString);
@@ -89,7 +87,6 @@ const NTUberApp = () => {
 
   const statusMap = ['Created', 'Accepted', 'Ongoing', 'Completed', 'Cancelled'];
 
-  // --- 網路切換輔助函式 ---
   const switchNetwork = async () => {
     if (!window.ethereum) return;
     try {
@@ -149,15 +146,16 @@ const NTUberApp = () => {
     };
   }, []); 
 
-  // --- 讀取鏈上數據 ---
+  // --- 數據與事件 ---
   const fetchRides = async (_contract) => {
     try {
-      const count = await _contract.rideCount();
+      // 使用 Number() 轉換 BigInt，避免 ES2015 編譯錯誤
+      const countBigInt = await _contract.rideCount();
+      const count = Number(countBigInt); 
       const rides = [];
-      // 讀取最近的 20 筆訂單，以便顯示更完整的歷史
-      const start = count > 20n ? count - 20n : 1n;
+      const start = count > 20 ? count - 20 : 1; // 顯示最近 20 筆
       
-      for (let i = Number(count); i >= Number(start); i--) {
+      for (let i = count; i >= start; i--) {
         const ride = await _contract.getRideDetails(i);
         const pickupData = parseLocation(ride.pickupLocation);
         const dropoffData = parseLocation(ride.dropoffLocation);
@@ -173,7 +171,7 @@ const NTUberApp = () => {
           pickupCoords: { lat: pickupData.lat, lng: pickupData.lng },
           dropoffCoords: { lat: dropoffData.lat, lng: dropoffData.lng },
           isRated: ride.isRated,
-          timestamp: Number(ride.timestamp) // 新增時間戳記
+          timestamp: Number(ride.timestamp)
         });
       }
       setAllRides(rides);
@@ -182,10 +180,8 @@ const NTUberApp = () => {
     }
   };
 
-  // --- 設置事件監聽 ---
   const setupEventListeners = (_contract, myAddress) => {
     const refresh = () => fetchRides(_contract);
-
     _contract.on("RideRequested", refresh);
     _contract.on("RideAccepted", refresh);
     _contract.on("RideStarted", refresh);
@@ -194,7 +190,6 @@ const NTUberApp = () => {
     _contract.on("DriverRated", refresh);
   };
 
-  // --- 監聽訂單狀態變更 (更新 UI) ---
   useEffect(() => {
     if (!walletAddress || allRides.length === 0) return;
 
@@ -205,7 +200,6 @@ const NTUberApp = () => {
 
     const activeRide = myRides.sort((a, b) => b.id - a.id)[0];
     
-    // 如果正在查看歷史紀錄，不自動跳轉狀態，除非有新的進行中訂單
     if (appState === 'HISTORY' || appState === 'RATING') return;
 
     if (activeRide && ['Created', 'Accepted', 'Ongoing'].includes(activeRide.status)) {
@@ -228,8 +222,7 @@ const NTUberApp = () => {
     }
   }, [allRides, walletAddress, role]);
 
-  // --- 核心邏輯：與智能合約交互 ---
-
+  // --- 合約交互 ---
   const handleRequestRide = async () => {
     if (!pickup || !dropoff || !contract) return;
     try {
@@ -322,7 +315,6 @@ const NTUberApp = () => {
     }
   };
 
-  // 修改：支援取消指定 ID 的訂單 (若未指定則取消當前)
   const handleCancelRide = async (rideId = null) => {
     const targetId = rideId || myCurrentRide?.id;
     if (!contract || !targetId) return;
@@ -340,7 +332,6 @@ const NTUberApp = () => {
       setLoading(false);
       alert("訂單已取消，資金已退回您的錢包。");
       
-      // 如果是在歷史頁面取消，不重置整個 App，只需等待列表刷新
       if (appState !== 'HISTORY') {
         resetApp();
       }
@@ -381,32 +372,55 @@ const NTUberApp = () => {
     setPickupCoords(null);
     setDropoffCoords(null);
     setMyCurrentRide(null);
+    setPreviewRide(null); 
     setEstimatedPrice(0.001);
   };
 
-  const mockReverseGeocode = (lat, lng) => {
-    const distToNTU = Math.sqrt(Math.pow(lat - 25.0174, 2) + Math.pow(lng - 121.5397, 2));
-    if (distToNTU < 0.002) return "國立台灣大學圖書館";
-    if (distToNTU < 0.005) return "公館捷運站";
-    return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+  // --- 真實反向地理編碼 (Nominatim API) ---
+  const fetchAddress = async (lat, lng) => {
+    try {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lng}&accept-language=zh-TW`;
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Geocoding failed");
+      const data = await response.json();
+      
+      if (data.name) return data.name;
+      
+      const addr = data.address || {};
+      const road = addr.road || addr.pedestrian || addr.suburb || "";
+      const houseNumber = addr.house_number || "";
+      
+      if (road) return `${road}${houseNumber}`;
+      
+      return data.display_name?.split(',')[0] || `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    } catch (e) {
+      console.error("Geocoding Error:", e);
+      return `${lat.toFixed(4)}, ${lng.toFixed(4)}`;
+    }
   };
 
-  const handleMapClick = (lat, lng) => {
+  const handleMapClick = async (lat, lng) => {
     if (appState !== 'IDLE') return;
-    const address = mockReverseGeocode(lat, lng);
+    
+    const placeholder = "讀取地址中...";
+
     if (activeField === 'pickup' || !activeField) {
-      setPickup(address);
+      setPickup(placeholder);
       setPickupCoords({ lat, lng });
+      const address = await fetchAddress(lat, lng);
+      setPickup(address);
       if (!activeField) setActiveField('dropoff');
     } else if (activeField === 'dropoff') {
-      setDropoff(address);
+      setDropoff(placeholder);
       setDropoffCoords({ lat, lng });
+      const address = await fetchAddress(lat, lng);
+      setDropoff(address);
       setActiveField(null);
     }
   };
 
-  // --- Leaflet Map Component ---
-  const LeafletMap = ({ pickupCoords, dropoffCoords, currentRide, onMapClick }) => {
+  // --- 地圖元件 ---
+  const LeafletMap = ({ pickupCoords, dropoffCoords, currentRide, previewRide, onMapClick }) => {
     const mapRef = useRef(null);
     const mapInstanceRef = useRef(null);
     const markersRef = useRef([]);
@@ -441,16 +455,17 @@ const NTUberApp = () => {
         iconAnchor: [6, 6]
       });
 
-      const pCoords = currentRide?.pickupCoords || pickupCoords;
-      const dCoords = currentRide?.dropoffCoords || dropoffCoords;
+      // 優先顯示：正在進行的行程 > 司機預覽的訂單 > 乘客輸入的座標
+      const targetRide = currentRide || previewRide;
+      
+      const pCoords = targetRide?.pickupCoords || pickupCoords;
+      const dCoords = targetRide?.dropoffCoords || dropoffCoords;
 
       if (pCoords) {
-        const marker = L.marker([pCoords.lat, pCoords.lng], { icon: createIcon('black') }).addTo(map);
-        markersRef.current.push(marker);
+        L.marker([pCoords.lat, pCoords.lng], { icon: createIcon('black') }).addTo(map).bindPopup("上車點");
       }
       if (dCoords) {
-        const marker = L.marker([dCoords.lat, dCoords.lng], { icon: createIcon('gray') }).addTo(map);
-        markersRef.current.push(marker);
+        L.marker([dCoords.lat, dCoords.lng], { icon: createIcon('gray') }).addTo(map).bindPopup("目的地");
       }
       if (pCoords && dCoords) {
         const latlngs = [[pCoords.lat, pCoords.lng], [dCoords.lat, dCoords.lng]];
@@ -469,47 +484,46 @@ const NTUberApp = () => {
         });
         L.marker([pCoords.lat, pCoords.lng], { icon: carIcon, zIndexOffset: 1000 }).addTo(map);
       }
-    }, [pickupCoords, dropoffCoords, currentRide]);
+    }, [pickupCoords, dropoffCoords, currentRide, previewRide]);
     return <div ref={mapRef} className="absolute inset-0 z-0" />;
   };
 
-  // --- UI Components ---
+  // --- UI 元件 ---
+  
   const Header = () => {
-    // 處理左上角按鈕點擊
     const handleMenuClick = () => {
       if (appState === 'IDLE') {
-        setAppState('HISTORY'); // 從首頁進入歷史頁
+        setAppState('HISTORY'); 
       } else if (appState === 'HISTORY') {
-        setAppState('IDLE'); // 從歷史頁返回首頁
+        setAppState('IDLE'); 
       } else {
         if (confirm('確定要取消並返回嗎？')) resetApp();
       }
     };
 
     return (
-      <div className="absolute top-0 left-0 right-0 z-20 p-4 flex justify-between items-start pointer-events-none">
-        <div className="pointer-events-auto">
+      <div className="w-full bg-white p-4 border-b border-gray-100 flex flex-col space-y-3 z-30">
+        <div className="flex justify-between items-center">
           <button 
             onClick={handleMenuClick}
-            className="bg-white p-3 rounded-full shadow-lg hover:bg-gray-100 transition relative"
+            className="bg-gray-100 p-2 rounded-full hover:bg-gray-200 transition"
           >
-            {/* 根據狀態顯示不同圖標 */}
-            {appState === 'IDLE' ? <Menu size={24} /> : <ChevronLeft size={24} />}
-            
-            {/* 如果在 IDLE 狀態顯示提示紅點 (如果有進行中訂單) - 可選 */}
+            {appState === 'IDLE' ? <Menu size={20} /> : <ChevronLeft size={20} />}
           </button>
-        </div>
-        <div className="pointer-events-auto bg-white/90 backdrop-blur rounded-full p-1 shadow-lg flex space-x-1">
-          <button onClick={() => setRole('passenger')} className={`px-4 py-2 rounded-full text-sm font-bold transition ${role === 'passenger' ? 'bg-black text-white' : 'text-gray-500 hover:bg-gray-100'}`}>乘客</button>
-          <button onClick={() => setRole('driver')} className={`px-4 py-2 rounded-full text-sm font-bold transition ${role === 'driver' ? 'bg-black text-white' : 'text-gray-500 hover:bg-gray-100'}`}>司機</button>
-        </div>
-        <div className="pointer-events-auto flex flex-col items-end space-y-2">
-          <div className="bg-white/90 backdrop-blur px-4 py-2 rounded-full shadow-lg flex items-center space-x-2">
-            <Wallet size={16} className="text-green-600" />
-            <span className="font-mono font-bold">{balance} ETH</span>
+          
+          <div className="bg-gray-100 p-1 rounded-full flex text-sm">
+            <button onClick={() => setRole('passenger')} className={`px-3 py-1 rounded-full transition ${role === 'passenger' ? 'bg-black text-white' : 'text-gray-500'}`}>乘客</button>
+            <button onClick={() => setRole('driver')} className={`px-3 py-1 rounded-full transition ${role === 'driver' ? 'bg-black text-white' : 'text-gray-500'}`}>司機</button>
           </div>
-          <div className="bg-black text-white px-3 py-1 rounded-full text-xs opacity-75 truncate max-w-[100px]">
-            {walletAddress ? `${walletAddress.substring(0, 6)}...${walletAddress.substring(38)}` : '未連接'}
+        </div>
+        
+        <div className="flex justify-between items-center text-xs">
+          <div className="flex items-center space-x-1 bg-green-50 text-green-700 px-2 py-1 rounded">
+            <Wallet size={12} />
+            <span className="font-mono">{balance} ETH</span>
+          </div>
+          <div className="text-gray-400">
+            {walletAddress ? `${walletAddress.substring(0, 6)}...` : '未連接'}
           </div>
         </div>
       </div>
@@ -524,69 +538,58 @@ const NTUberApp = () => {
     </div>
   );
 
-  // 新增：歷史行程視圖
   const renderHistoryView = () => {
-    // 過濾出與我相關的行程
     const myHistory = allRides.filter(r => 
       r.passenger.toLowerCase() === walletAddress.toLowerCase() || 
       (r.driver && r.driver.toLowerCase() === walletAddress.toLowerCase())
-    ).sort((a, b) => b.id - a.id); // 降序排列
+    ).sort((a, b) => b.id - a.id); 
 
     return (
-      <div className="absolute bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-2xl z-20 p-6 pointer-events-auto h-3/4 flex flex-col">
-        <div className="flex justify-between items-center mb-4 flex-shrink-0">
-          <div>
-            <h2 className="text-2xl font-bold flex items-center"><History className="mr-2"/> 我的行程</h2>
-            <span className="text-xs text-gray-400">Sepolia Chain History</span>
-          </div>
-          <button onClick={() => setAppState('IDLE')} className="p-2 bg-gray-100 rounded-full hover:bg-gray-200"><XCircle size={20}/></button>
+      <div className="flex-grow flex flex-col h-full bg-white">
+        <div className="flex justify-between items-center p-4 border-b">
+            <h2 className="text-xl font-bold flex items-center"><History className="mr-2" size={20}/> 我的行程</h2>
+            <button onClick={() => setAppState('IDLE')} className="p-1.5 bg-gray-100 rounded-full hover:bg-gray-200"><XCircle size={18}/></button>
         </div>
-
-        <div className="flex-grow overflow-y-auto space-y-4 pb-4">
+        <div className="flex-grow overflow-y-auto p-4 space-y-4">
           {myHistory.length === 0 ? (
             <div className="text-center py-12 text-gray-400"><p>尚無行程紀錄</p></div>
           ) : (
             myHistory.map((ride) => (
-              <div key={ride.id} className="border border-gray-100 bg-gray-50 p-4 rounded-xl shadow-sm relative">
-                <div className="flex justify-between items-start mb-2">
+              <div key={ride.id} className="border border-gray-100 bg-gray-50 p-3 rounded-xl shadow-sm">
+                <div className="flex justify-between items-center mb-2">
                   <div className="flex items-center space-x-2">
                     <span className="font-bold text-gray-800">#{ride.id}</span>
-                    <span className={`text-xs px-2 py-0.5 rounded-full font-bold ${
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-bold ${
                       ride.status === 'Completed' ? 'bg-green-100 text-green-700' :
                       ride.status === 'Cancelled' ? 'bg-red-100 text-red-700' :
                       ride.status === 'Created' ? 'bg-yellow-100 text-yellow-700' :
                       'bg-blue-100 text-blue-700'
                     }`}>{ride.status}</span>
                   </div>
-                  <span className="font-mono text-sm">{ride.amount} ETH</span>
+                  <span className="font-mono text-xs">{ride.amount} ETH</span>
                 </div>
-                
-                <div className="space-y-1 text-sm text-gray-600 mb-3">
-                  <div className="flex items-center"><MapPin size={12} className="mr-1"/> {ride.pickup}</div>
-                  <div className="flex items-center"><Navigation size={12} className="mr-1"/> {ride.dropoff}</div>
+                <div className="space-y-1 text-xs text-gray-600 mb-3">
+                  <div className="flex items-center"><MapPin size={10} className="mr-1"/> {ride.pickup}</div>
+                  <div className="flex items-center"><Navigation size={10} className="mr-1"/> {ride.dropoff}</div>
                   {ride.timestamp > 0 && (
-                    <div className="flex items-center text-xs text-gray-400 mt-1">
+                    <div className="flex items-center text-gray-400 mt-1">
                       <Clock size={10} className="mr-1"/> {new Date(ride.timestamp * 1000).toLocaleString()}
                     </div>
                   )}
                 </div>
-
-                {/* 只有在 Created 或 Accepted 狀態下，乘客可以取消 */}
                 {['Created', 'Accepted'].includes(ride.status) && ride.passenger.toLowerCase() === walletAddress.toLowerCase() && (
                   <button 
                     onClick={() => handleCancelRide(ride.id)} 
                     disabled={loading}
-                    className="w-full mt-2 bg-white border border-red-200 text-red-600 py-2 rounded-lg text-sm font-bold hover:bg-red-50 flex items-center justify-center"
+                    className="w-full mt-1 bg-white border border-red-200 text-red-600 py-1.5 rounded text-xs font-bold hover:bg-red-50 flex items-center justify-center"
                   >
-                    <XCircle size={14} className="mr-1"/> 取消行程 (退款)
+                    <XCircle size={12} className="mr-1"/> 取消 (退款)
                   </button>
                 )}
-                
-                {/* 如果已完成且未評價 */}
                 {ride.status === 'Completed' && !ride.isRated && ride.passenger.toLowerCase() === walletAddress.toLowerCase() && (
                   <button 
                     onClick={() => { setMyCurrentRide(ride); setAppState('RATING'); }} 
-                    className="w-full mt-2 bg-black text-white py-2 rounded-lg text-sm font-bold hover:opacity-90"
+                    className="w-full mt-1 bg-black text-white py-1.5 rounded text-xs font-bold hover:opacity-90"
                   >
                     前往評價
                   </button>
@@ -600,17 +603,14 @@ const NTUberApp = () => {
   };
 
   const renderPassengerView = () => {
-    // 優先處理 HISTORY 狀態
-    if (appState === 'HISTORY') {
-      return renderHistoryView();
-    }
+    if (appState === 'HISTORY') return renderHistoryView();
 
     if (appState === 'IDLE') {
       return (
-        <div className="absolute bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-[0_-5px_20px_rgba(0,0,0,0.1)] z-20 p-6 animate-slide-up pointer-events-auto">
+        <div className="flex-grow flex flex-col p-6 overflow-y-auto">
           <h2 className="text-2xl font-bold mb-4">想去哪裡？</h2>
           <p className="text-xs text-gray-500 mb-4 flex items-center">
-            <Crosshair size={12} className="mr-1"/> 點擊輸入框後在地圖上選點
+            <Crosshair size={12} className="mr-1"/> 請輸入地點或點選地圖
           </p>
           <div className="space-y-4 mb-6">
             <div className="relative">
@@ -634,8 +634,8 @@ const NTUberApp = () => {
               </div>
             </div>
           )}
-          <button onClick={handleRequestRide} disabled={!pickup || !dropoff || loading} className="w-full bg-black text-white py-4 rounded-xl font-bold text-lg shadow-lg hover:scale-[1.01] transition-transform disabled:opacity-50 disabled:cursor-not-allowed">
-            {loading ? '處理中...' : '確認叫車 (Sepolia ETH)'}
+          <button onClick={handleRequestRide} disabled={!pickup || !dropoff || loading} className="w-full bg-black text-white py-4 rounded-xl font-bold text-lg shadow-lg hover:scale-[1.01] transition-transform disabled:opacity-50 disabled:cursor-not-allowed mt-auto">
+            {loading ? '處理中...' : '確認叫車'}
           </button>
         </div>
       );
@@ -643,14 +643,13 @@ const NTUberApp = () => {
 
     if (appState === 'WAITING_DRIVER') {
       return (
-        <div className="absolute bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-2xl z-20 p-6 text-center pointer-events-auto">
-          <div className="animate-pulse mb-4 flex justify-center"><div className="bg-gray-100 p-4 rounded-full"><Navigation size={48} className="text-black animate-spin-slow" /></div></div>
+        <div className="flex-grow flex flex-col p-6 items-center justify-center text-center">
+          <div className="animate-pulse mb-4"><div className="bg-gray-100 p-4 rounded-full"><Navigation size={48} className="text-black animate-spin-slow" /></div></div>
           <h3 className="text-xl font-bold mb-2">訂單已上鏈！</h3>
-          <p className="text-gray-500 mb-6">正在等待區塊鏈上的司機接單...</p>
+          <p className="text-gray-500 mb-6">等待司機接單...</p>
           <div className="w-full bg-gray-200 h-1.5 rounded-full overflow-hidden mb-6"><div className="bg-black h-full w-2/3 animate-indeterminate"></div></div>
-          {/* 更新：改為真實取消按鈕 */}
-          <button onClick={() => handleCancelRide(null)} disabled={loading} className="text-red-500 font-bold underline hover:text-red-700 flex items-center justify-center mx-auto">
-             <XCircle size={16} className="mr-1"/> 取消叫車並退款
+          <button onClick={() => handleCancelRide(null)} disabled={loading} className="text-red-500 font-bold underline hover:text-red-700 flex items-center justify-center">
+             <XCircle size={16} className="mr-1"/> 取消並退款
           </button>
         </div>
       );
@@ -660,31 +659,39 @@ const NTUberApp = () => {
   };
 
   const renderDriverView = () => {
-    // 司機也可以查看歷史
     if (appState === 'HISTORY') return renderHistoryView();
-
     if (myCurrentRide && ['Accepted', 'Ongoing'].includes(myCurrentRide.status)) return renderActiveRideView();
     return (
-      <div className="absolute bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-2xl z-20 p-6 pointer-events-auto h-2/3 flex flex-col">
-        <div className="flex justify-between items-center mb-4 flex-shrink-0">
-          <div><h2 className="text-2xl font-bold flex items-center"><List className="mr-2"/> 鏈上訂單列表</h2><span className="text-xs text-gray-400">Sepolia Testnet Live Feed</span></div>
-          <div className="flex items-center space-x-2 bg-black text-white px-3 py-1 rounded-full text-sm"><div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div><span>上線中</span></div>
+      <div className="flex-grow flex flex-col h-full bg-white">
+        <div className="flex justify-between items-center p-4 border-b bg-gray-50">
+          <div><h2 className="text-lg font-bold flex items-center"><List className="mr-2" size={20}/> 訂單池</h2><span className="text-[10px] text-gray-400">Sepolia Live Feed</span></div>
+          <div className="flex items-center space-x-1 bg-black text-white px-2 py-0.5 rounded-full text-xs"><div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div><span>上線</span></div>
         </div>
-        <div className="flex-grow overflow-y-auto space-y-4 pb-4">
+        <div className="flex-grow overflow-y-auto p-4 space-y-4">
           {allRides.filter(r => r.status === 'Created').length === 0 ? (
-            <div className="text-center py-12 text-gray-400"><p>目前鏈上沒有待處理訂單</p></div>
+            <div className="text-center py-12 text-gray-400"><p>目前無待處理訂單</p></div>
           ) : (
             allRides.filter(r => r.status === 'Created').map((ride) => (
-              <div key={ride.id} className="border-2 border-gray-100 bg-white p-4 rounded-xl shadow-sm hover:border-black transition relative">
-                <div className="flex justify-between items-start mb-3">
-                  <div className="flex items-center space-x-2"><div className="bg-gray-100 p-1.5 rounded-full"><User size={14}/></div><span className="font-bold text-gray-600">ID: #{ride.id}</span></div>
-                  <span className="font-bold text-xl text-green-600">{ride.amount} ETH</span>
+              <div 
+                key={ride.id} 
+                onClick={() => setPreviewRide(ride)} // 點擊時設定預覽訂單
+                className={`border-2 p-4 rounded-xl shadow-sm transition relative cursor-pointer ${previewRide?.id === ride.id ? 'border-black bg-gray-50' : 'border-gray-100 bg-white hover:border-gray-300'}`}
+              >
+                <div className="flex justify-between items-start mb-2">
+                  <div className="flex items-center space-x-2"><div className="bg-gray-100 p-1 rounded-full"><User size={12}/></div><span className="font-bold text-gray-600">#{ride.id}</span></div>
+                  <span className="font-bold text-green-600">{ride.amount} ETH</span>
                 </div>
-                <div className="space-y-3 text-sm text-gray-700 mb-4">
-                  <div className="flex items-start space-x-2"><div className="w-2 h-2 bg-black rounded-full mt-1.5 flex-shrink-0"></div><span className="break-words">{ride.pickup}</span></div>
-                  <div className="flex items-start space-x-2"><div className="w-2 h-2 bg-black opacity-30 mt-1.5 flex-shrink-0"></div><span className="break-words">{ride.dropoff}</span></div>
+                <div className="space-y-2 text-xs text-gray-700 mb-3">
+                  <div className="flex items-start space-x-2"><div className="w-1.5 h-1.5 bg-black rounded-full mt-1 flex-shrink-0"></div><span className="break-words">{ride.pickup}</span></div>
+                  <div className="flex items-start space-x-2"><div className="w-1.5 h-1.5 bg-gray-400 mt-1 flex-shrink-0"></div><span className="break-words">{ride.dropoff}</span></div>
                 </div>
-                <button onClick={() => handleAcceptRide(ride.id)} disabled={loading} className="w-full bg-black text-white py-3 rounded-lg font-bold shadow hover:opacity-90 disabled:opacity-50">{loading ? '處理中...' : '接單 (Gas)'}</button>
+                <button 
+                  onClick={(e) => { e.stopPropagation(); handleAcceptRide(ride.id); }} 
+                  disabled={loading} 
+                  className="w-full bg-black text-white py-2 rounded-lg font-bold shadow hover:opacity-90 disabled:opacity-50 text-sm"
+                >
+                  {loading ? '處理中...' : '接單'}
+                </button>
               </div>
             ))
           )}
@@ -695,69 +702,74 @@ const NTUberApp = () => {
 
   const renderActiveRideView = () => {
     const isDriver = role === 'driver';
-    const title = appState === 'DRIVER_EN_ROUTE' ? (isDriver ? '前往接送乘客' : '司機正在前往您的位置') : '行程進行中';
-    
-    // 是否可以取消：只有在 DRIVER_EN_ROUTE 狀態下，且為乘客或司機（合約允許雙方取消）
+    const title = appState === 'DRIVER_EN_ROUTE' ? (isDriver ? '前往接送' : '司機趕來中') : '行程進行中';
     const canCancel = appState === 'DRIVER_EN_ROUTE';
 
     return (
-      <div className="absolute bottom-0 left-0 right-0 bg-white rounded-t-3xl shadow-2xl z-20 p-0 overflow-hidden pointer-events-auto">
+      <div className="flex-grow flex flex-col h-full bg-white">
         <div className="bg-black text-white p-4 text-center font-bold flex justify-between items-center relative">
           <div className="w-full text-center">{title}</div>
-          {/* 在標題列右側加入取消按鈕（如果允許的話） */}
           {canCancel && (
-            <button 
-              onClick={() => handleCancelRide(null)} 
-              disabled={loading}
-              className="absolute right-4 text-xs bg-red-600 px-2 py-1 rounded hover:bg-red-700 transition"
-            >
-              取消
-            </button>
+            <button onClick={() => handleCancelRide(null)} disabled={loading} className="absolute right-4 text-xs bg-red-600 px-2 py-1 rounded hover:bg-red-700 transition">取消</button>
           )}
         </div>
-        <div className="p-6">
-          <div className="flex justify-between items-center mb-6 border-b border-gray-100 pb-6">
-            <div className="flex items-center space-x-4">
-              <div className="w-16 h-16 bg-gray-200 rounded-full flex items-center justify-center overflow-hidden border-2 border-white shadow"><User size={32} className="text-gray-500" /></div>
-              <div>
-                <h3 className="font-bold text-xl">{isDriver ? '乘客' : '司機'}</h3>
-                <div className="flex items-center space-x-1 text-gray-500 text-sm"><Star size={14} fill="currentColor" className="text-yellow-500" /><span>4.9</span></div>
-                <div className="text-xs text-gray-400 mt-1">ID #{myCurrentRide?.id}</div>
-              </div>
+        <div className="p-6 flex-grow flex flex-col">
+          <div className="flex items-center space-x-4 mb-6 pb-6 border-b">
+            <div className="w-12 h-12 bg-gray-200 rounded-full flex items-center justify-center border-2 border-white shadow"><User size={24} className="text-gray-500" /></div>
+            <div>
+              <h3 className="font-bold text-lg">{isDriver ? '乘客' : '司機'}</h3>
+              <div className="flex items-center space-x-1 text-gray-500 text-xs"><Star size={12} fill="currentColor" className="text-yellow-500" /><span>4.9</span></div>
+              <div className="text-[10px] text-gray-400 mt-1">ID #{myCurrentRide?.id}</div>
             </div>
           </div>
-          {isDriver ? (
-             appState === 'DRIVER_EN_ROUTE' ? (
-                <button onClick={handleStartRide} disabled={loading} className="w-full bg-black text-white py-4 rounded-xl font-bold text-lg shadow-lg hover:scale-[1.01] transition">確認接到乘客 (上鏈)</button>
-             ) : (<div className="w-full bg-green-50 border border-green-200 text-green-800 py-4 rounded-xl font-bold text-lg text-center">行程進行中...</div>)
-          ) : (
-             appState === 'IN_TRIP' ? (
-               <button onClick={handleCompleteRide} disabled={loading} className="w-full bg-green-600 text-white py-4 rounded-xl font-bold text-lg shadow-lg hover:bg-green-700 transition">{loading ? '確認中...' : '確認到達並釋放資金 (ETH)'}</button>
-             ) : (<button disabled className="w-full bg-gray-100 text-gray-400 py-4 rounded-xl font-bold text-lg cursor-not-allowed">等待司機到達...</button>)
-          )}
+          <div className="mt-auto">
+             {isDriver ? (
+               appState === 'DRIVER_EN_ROUTE' ? (
+                  <button onClick={handleStartRide} disabled={loading} className="w-full bg-black text-white py-4 rounded-xl font-bold shadow-lg hover:scale-[1.01] transition">確認接到乘客</button>
+               ) : (<div className="w-full bg-green-50 border border-green-200 text-green-800 py-4 rounded-xl font-bold text-center">行程進行中...</div>)
+            ) : (
+               appState === 'IN_TRIP' ? (
+                 <button onClick={handleCompleteRide} disabled={loading} className="w-full bg-green-600 text-white py-4 rounded-xl font-bold shadow-lg hover:bg-green-700 transition">{loading ? '確認中...' : '確認到達 (付款)'}</button>
+               ) : (<button disabled className="w-full bg-gray-100 text-gray-400 py-4 rounded-xl font-bold cursor-not-allowed">等待司機...</button>)
+            )}
+          </div>
         </div>
       </div>
     );
   };
 
   const renderRatingView = () => (
-    <div className="absolute inset-0 bg-white z-50 flex flex-col items-center justify-center p-8 animate-fade-in pointer-events-auto">
-      <div className="w-24 h-24 bg-green-100 rounded-full flex items-center justify-center mb-6 text-green-600"><ShieldCheck size={48} /></div>
-      <h2 className="text-3xl font-bold mb-2">行程完成！</h2>
-      <p className="text-gray-500 mb-8 text-center">資金已透過智能合約轉移。<br/>請為本次行程評分。</p>
-      <div className="flex space-x-4 mb-10">{[1, 2, 3, 4, 5].map(star => (<button key={star} onClick={() => handleRateDriver(star)} className="transform hover:scale-110 transition"><Star size={40} className="text-yellow-400 hover:fill-current" /></button>))}</div>
-      <button onClick={() => { resetApp(); }} className="text-gray-400 underline">跳過評分</button>
+    <div className="flex-grow flex flex-col items-center justify-center p-8 bg-white z-50">
+      <div className="w-20 h-20 bg-green-100 rounded-full flex items-center justify-center mb-6 text-green-600"><ShieldCheck size={40} /></div>
+      <h2 className="text-2xl font-bold mb-2">行程完成！</h2>
+      <p className="text-gray-500 mb-8 text-center text-sm">資金已轉移。請評分。</p>
+      <div className="flex space-x-3 mb-10">{[1, 2, 3, 4, 5].map(star => (<button key={star} onClick={() => handleRateDriver(star)} className="transform hover:scale-110 transition"><Star size={32} className="text-yellow-400 hover:fill-current" /></button>))}</div>
+      <button onClick={() => { resetApp(); }} className="text-gray-400 underline text-sm">跳過</button>
     </div>
   );
 
   return (
-    <div className="font-sans text-gray-900 bg-gray-100 h-screen w-full relative overflow-hidden flex flex-col">
-      <LeafletMap pickupCoords={pickupCoords} dropoffCoords={dropoffCoords} currentRide={myCurrentRide} onMapClick={handleMapClick} />
-      {loading && <LoadingOverlay />}
-      <Header />
-      <div className="relative z-10 flex-grow pointer-events-none">
-         {role === 'passenger' ? renderPassengerView() : renderDriverView()}
+    <div className="font-sans text-gray-900 bg-gray-100 h-screen w-full flex flex-row overflow-hidden">
+      {/* 左側 UI 面板 (固定寬度 400px 或 35%) */}
+      <div className="w-full md:w-[400px] lg:w-[35%] min-w-[320px] max-w-[450px] flex-shrink-0 bg-white shadow-xl z-20 flex flex-col relative h-full">
+        <Header />
+        <div className="flex-grow overflow-hidden relative flex flex-col">
+            {role === 'passenger' ? renderPassengerView() : renderDriverView()}
+        </div>
       </div>
+
+      {/* 右側地圖 (填滿剩餘空間) */}
+      <div className="flex-grow relative z-0 h-full">
+        <LeafletMap 
+          pickupCoords={pickupCoords} 
+          dropoffCoords={dropoffCoords} 
+          currentRide={myCurrentRide} 
+          previewRide={previewRide} 
+          onMapClick={handleMapClick} 
+        />
+      </div>
+
+      {loading && <LoadingOverlay />}
     </div>
   );
 };
