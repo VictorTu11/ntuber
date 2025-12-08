@@ -21,11 +21,11 @@ import {
 } from 'lucide-react';
 
 /**
- * NTUber DApp - Local Development Version (Standard)
- * * 功能確認：
- * 1. 司機點擊列表訂單時，地圖會顯示對應的起點/終點大頭釘 (Preview Mode)。
- * 2. 已修復 BigInt 編譯錯誤 (移除 n 後綴)。
- * 3. 包含 P2P 訂單簿、歷史紀錄、取消功能、地址自動填入。
+ * NTUber DApp - Local Development Version (Fixed)
+ * * 更新：
+ * 1. 新增「跳過評價」邏輯：使用 localStorage 記錄跳過的訂單。
+ * 2. 重整頁面後，若已跳過評價，不會再自動彈出評價視窗。
+ * 3. 仍可從「我的行程」中手動進行評價。
  */
 
 // --- 合約設定 ---
@@ -73,8 +73,18 @@ const NTUberApp = () => {
 
   const [allRides, setAllRides] = useState([]); 
   const [myCurrentRide, setMyCurrentRide] = useState(null);
-  // 新增 previewRide 狀態：用於司機在列表中點選某個訂單時，在地圖上預覽該訂單路線
   const [previewRide, setPreviewRide] = useState(null); 
+
+  // 新增：記錄跳過評價的訂單 ID (從 localStorage 初始化)
+  const [skippedRideIds, setSkippedRideIds] = useState(() => {
+    const saved = localStorage.getItem('ntuber_skipped_ratings');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  // 當 skippedRideIds 變更時，同步到 localStorage
+  useEffect(() => {
+    localStorage.setItem('ntuber_skipped_ratings', JSON.stringify(skippedRideIds));
+  }, [skippedRideIds]);
 
   // --- 輔助功能 ---
   const parseLocation = (locString) => {
@@ -149,11 +159,10 @@ const NTUberApp = () => {
   // --- 數據與事件 ---
   const fetchRides = async (_contract) => {
     try {
-      // 使用 Number() 轉換 BigInt，避免 ES2015 編譯錯誤
       const countBigInt = await _contract.rideCount();
-      const count = Number(countBigInt); 
+      const count = Number(countBigInt);
       const rides = [];
-      const start = count > 20 ? count - 20 : 1; // 顯示最近 20 筆
+      const start = count > 20 ? count - 20 : 1;
       
       for (let i = count; i >= start; i--) {
         const ride = await _contract.getRideDetails(i);
@@ -212,7 +221,13 @@ const NTUberApp = () => {
       } else if (activeRide.status === 'Ongoing') {
         setAppState('IN_TRIP');
       }
-    } else if (activeRide && activeRide.status === 'Completed' && !activeRide.isRated && role === 'passenger') {
+    } else if (
+        activeRide && 
+        activeRide.status === 'Completed' && 
+        !activeRide.isRated && 
+        role === 'passenger' &&
+        !skippedRideIds.includes(activeRide.id) // 修改：檢查是否已跳過
+    ) {
         setMyCurrentRide(activeRide);
         setAppState('RATING');
     } else if (activeRide && activeRide.status === 'Cancelled') {
@@ -220,7 +235,7 @@ const NTUberApp = () => {
              resetApp();
         }
     }
-  }, [allRides, walletAddress, role]);
+  }, [allRides, walletAddress, role, skippedRideIds]); // 加入 skippedRideIds 依賴
 
   // --- 合約交互 ---
   const handleRequestRide = async () => {
@@ -365,6 +380,14 @@ const NTUberApp = () => {
     }
   };
 
+  // 新增：處理跳過評價
+  const handleSkipRating = () => {
+    if (myCurrentRide) {
+      setSkippedRideIds(prev => [...prev, myCurrentRide.id]);
+    }
+    resetApp();
+  };
+
   const resetApp = () => {
     setAppState('IDLE');
     setPickup('');
@@ -374,6 +397,10 @@ const NTUberApp = () => {
     setMyCurrentRide(null);
     setPreviewRide(null); 
     setEstimatedPrice(0.001);
+  };
+
+  const parseJsonSafe = (str) => {
+    try { return JSON.parse(str); } catch (e) { return null; }
   };
 
   // --- 真實反向地理編碼 (Nominatim API) ---
@@ -455,7 +482,6 @@ const NTUberApp = () => {
         iconAnchor: [6, 6]
       });
 
-      // 優先顯示：正在進行的行程 > 司機預覽的訂單 > 乘客輸入的座標
       const targetRide = currentRide || previewRide;
       
       const pCoords = targetRide?.pickupCoords || pickupCoords;
@@ -501,6 +527,8 @@ const NTUberApp = () => {
       }
     };
 
+    const isRoleLocked = ['WAITING_DRIVER', 'DRIVER_EN_ROUTE', 'IN_TRIP', 'RATING'].includes(appState);
+
     return (
       <div className="w-full bg-white p-4 border-b border-gray-100 flex flex-col space-y-3 z-30">
         <div className="flex justify-between items-center">
@@ -511,9 +539,26 @@ const NTUberApp = () => {
             {appState === 'IDLE' ? <Menu size={20} /> : <ChevronLeft size={20} />}
           </button>
           
-          <div className="bg-gray-100 p-1 rounded-full flex text-sm">
-            <button onClick={() => setRole('passenger')} className={`px-3 py-1 rounded-full transition ${role === 'passenger' ? 'bg-black text-white' : 'text-gray-500'}`}>乘客</button>
-            <button onClick={() => setRole('driver')} className={`px-3 py-1 rounded-full transition ${role === 'driver' ? 'bg-black text-white' : 'text-gray-500'}`}>司機</button>
+          <div className="bg-gray-100 p-1 rounded-full flex text-sm relative group">
+            <button 
+              onClick={() => !isRoleLocked && setRole('passenger')} 
+              disabled={isRoleLocked}
+              className={`px-3 py-1 rounded-full transition ${role === 'passenger' ? 'bg-black text-white' : 'text-gray-500'} ${isRoleLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              乘客
+            </button>
+            <button 
+              onClick={() => !isRoleLocked && setRole('driver')} 
+              disabled={isRoleLocked}
+              className={`px-3 py-1 rounded-full transition ${role === 'driver' ? 'bg-black text-white' : 'text-gray-500'} ${isRoleLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
+            >
+              司機
+            </button>
+            {isRoleLocked && (
+              <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 w-32 bg-black text-white text-[10px] p-1 rounded opacity-0 group-hover:opacity-100 transition pointer-events-none text-center">
+                行程中無法切換角色
+              </div>
+            )}
           </div>
         </div>
         
@@ -586,6 +631,7 @@ const NTUberApp = () => {
                     <XCircle size={12} className="mr-1"/> 取消 (退款)
                   </button>
                 )}
+                {/* 即使跳過評價，這裡仍可手動點擊評價 */}
                 {ride.status === 'Completed' && !ride.isRated && ride.passenger.toLowerCase() === walletAddress.toLowerCase() && (
                   <button 
                     onClick={() => { setMyCurrentRide(ride); setAppState('RATING'); }} 
@@ -674,7 +720,7 @@ const NTUberApp = () => {
             allRides.filter(r => r.status === 'Created').map((ride) => (
               <div 
                 key={ride.id} 
-                onClick={() => setPreviewRide(ride)} // 點擊時設定預覽訂單
+                onClick={() => setPreviewRide(ride)}
                 className={`border-2 p-4 rounded-xl shadow-sm transition relative cursor-pointer ${previewRide?.id === ride.id ? 'border-black bg-gray-50' : 'border-gray-100 bg-white hover:border-gray-300'}`}
               >
                 <div className="flex justify-between items-start mb-2">
@@ -744,7 +790,8 @@ const NTUberApp = () => {
       <h2 className="text-2xl font-bold mb-2">行程完成！</h2>
       <p className="text-gray-500 mb-8 text-center text-sm">資金已轉移。請評分。</p>
       <div className="flex space-x-3 mb-10">{[1, 2, 3, 4, 5].map(star => (<button key={star} onClick={() => handleRateDriver(star)} className="transform hover:scale-110 transition"><Star size={32} className="text-yellow-400 hover:fill-current" /></button>))}</div>
-      <button onClick={() => { resetApp(); }} className="text-gray-400 underline text-sm">跳過</button>
+      {/* 修改：跳過按鈕，觸發 handleSkipRating */}
+      <button onClick={handleSkipRating} className="text-gray-400 underline text-sm">跳過</button>
     </div>
   );
 
